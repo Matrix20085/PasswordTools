@@ -51,6 +51,8 @@ def create_hashlist(name, hashtypeId, hashlist):
     })
     return response.get("hashlistId")
 
+# Change to supertask
+# Check all other tasks and put at bottom of list, start at 100 counting down
 def create_task(hashlist_id):
     return hashtopolis_request({
         "section": "task",
@@ -110,6 +112,7 @@ def upload_cracked_to_hashes_com(hashtype_id, cracked):
     if batch:
         write_and_upload_batch(batch, algo, file_index)
 
+# Check response for failure
 def write_and_upload_batch(lines, algo, index):
     filename = f"founds_{algo}_{index}.txt"
     with open(filename, "w") as f:
