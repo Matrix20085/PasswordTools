@@ -32,8 +32,8 @@ def create_lmdb(db_path):
 
     db_full_path = os.path.join(db_path, "database")
     # dbenv = lmdb.open(db_full_path, map_size=1073741824) # 1GB
-    dbenv = lmdb.open(db_full_path, map_size=10737418240) # 10GB
-    # dbenv = lmdb.open(db_full_path, map_size=53687091200) # 50GB
+    # dbenv = lmdb.open(db_full_path, map_size=10737418240) # 10GB
+    dbenv = lmdb.open(db_full_path, map_size=53687091200) # 50GB
     # dbenv = lmdb.open(db_full_path, map_size=536870912000) # 500GB
     return dbenv
 
@@ -113,7 +113,12 @@ def process_file(file_path, dbenv):
                             file_duplicates += 1
                     except lmdb.Error as e:
                         print(f"LMDB error during put: {e}")
-                        pass
+                        print("Attempting to write buffer to DB")
+                        try:
+                            txn.commit()
+                        except:
+                            txn.abort()
+                        raise
                     except Exception as e:
                         print(f"Non-LMDB error during put: {e}")
                         pass
@@ -274,7 +279,7 @@ def main():
     
     print("Output folder:", options.output)
     print("Output file names: ", options.outputfile, "{#}.txt", sep='')
-    print("Database location: ", options.database, "\database", sep='')
+    print("Database location: ", options.database, "\\database", sep='')
     
     # Create the output folder if it doesn't exist
     if not os.path.exists(options.output):
@@ -318,6 +323,8 @@ def main():
     print("Number of lines that were not words:",f"{non_words:,}")
     
     
+    dbenv.close()
+
     elapsed_time = time.time() - start_time
     formatted_time = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
     print("Total runtime:", formatted_time)
