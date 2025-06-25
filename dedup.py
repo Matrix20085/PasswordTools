@@ -4,9 +4,11 @@ import lmdb
 import os
 import sys
 import re
+import io
 import hashlib
 
 from tqdm import tqdm
+from charset_normalizer import from_bytes
 
 def parse_cli_options():
 
@@ -30,8 +32,9 @@ def create_lmdb(db_path):
 
     db_full_path = os.path.join(db_path, "database")
     # dbenv = lmdb.open(db_full_path, map_size=1073741824) # 1GB
-    # dbenv = lmdb.open(db_full_path, map_size=53687091200) # 50GB
-    dbenv = lmdb.open(db_full_path, map_size=536870912000) # 500GB
+    # dbenv = lmdb.open(db_full_path, map_size=10737418240) # 10GB
+    dbenv = lmdb.open(db_full_path, map_size=53687091200) # 50GB
+    # dbenv = lmdb.open(db_full_path, map_size=536870912000) # 500GB
     return dbenv
 
 # Returns number of entries in DB
@@ -55,10 +58,20 @@ def update_db(key,value,dbenv):
         txn.put(key, str(new_value).encode(), overwrite=True)
         return new_value
 
+# Returns best guess of encoding
+def guess_encoding(path):
+    with open(path, "rb") as f:
+        sample = f.read(1048576)  # Read first 1 MB, safe for huge files
+    results = from_bytes(sample)
+    best = results.best()
+    return best.encoding if best else "utf-8"
+
 # Processes single file and returns stats about what has/has not been entered into DB
 def process_file(file_path, dbenv):
 
     total_bytes = os.path.getsize(file_path)
+    encoding = guess_encoding(file_path)
+
     file_total = 0
     file_new = 0
     file_duplicates = 0
@@ -72,36 +85,54 @@ def process_file(file_path, dbenv):
     else:
         update_interval = 1
 
-    with open(file_path, "rb") as f:
-        txn = dbenv.begin(write=True)
-        with tqdm(total=total_bytes, unit='B', unit_scale=True,
-                    desc=f"Processing {os.path.basename(file_path)}") as pbar:
-            for line in f:
-                bytes_since_update += len(line)
-                if bytes_since_update > update_interval:
-                    pbar.update(bytes_since_update)
-                    bytes_since_update = 0
-                file_total += 1
-                line = line.decode("utf-8", errors="replace").strip()
-                if not line.isprintable() or not len(line) < 33:
-                    file_non_words += 1
-                    continue
-                line = line.encode("utf-8")
-                try:
-                    result = txn.put(line, b'new', overwrite=False)
-                    if result:
-                        file_new += 1
-                    else:
-                        file_duplicates += 1
-                except Exception as e:
+    with open(file_path, "rb") as raw:
+        with io.TextIOWrapper(raw, encoding=encoding, errors="replace") as f:
+            txn = dbenv.begin(write=True)
+            with tqdm(total=total_bytes, unit='B', unit_scale=True,
+                        desc=f"Processing {os.path.basename(file_path)}") as pbar:
+                for line in f:
+                    line_bytes = len(line.encode(encoding, errors="replace"))
+                    bytes_since_update += line_bytes
+                    if bytes_since_update > update_interval:
+                        pbar.update(bytes_since_update)
+                        bytes_since_update = 0
+                    file_total += 1
+                    line = line.strip()
+                    if not line.isprintable() or not len(line) < 33: # Check string-level issues
+                        file_non_words += 1
+                        continue
+                    line_utf8 = line.encode("utf-8")
+                    if not line_utf8 or len(line_utf8) > 511: # Check byte-level issues
+                        file_non_words += 1
+                        continue
+                    try:
+                        result = txn.put(line_utf8, b'new', overwrite=False)
+                        if result:
+                            file_new += 1
+                        else:
+                            file_duplicates += 1
+                    except lmdb.Error as e:
+                        print(f"LMDB error during put: {e}")
+                        print("Attempting to write buffer to DB")
+                        try:
+                            txn.commit()
+                        except:
+                            txn.abort()
+                        raise
+                    except Exception as e:
+                        print(f"Non-LMDB error during put: {e}")
                         pass
-                buffer_count += len(line)
-                if buffer_count > 100000000: # Write to DB every 100MB
-                    txn.commit()
-                    txn = dbenv.begin(write=True)
-                    buffer_count = 0
-                
-        txn.commit()
+                    buffer_count += len(line_utf8)
+                    if buffer_count > 100000000: # Write to DB every 100MB
+                        try:
+                            txn.commit()
+                        except lmdb.Error as e:
+                            print(f"LMDB Error: {e.__class__.__name__} - {e}")
+                            txn.abort()
+                        txn = dbenv.begin(write=True)
+                        buffer_count = 0
+                    
+            txn.commit()
 
     return file_total, file_new, file_duplicates, file_non_words
 
@@ -248,7 +279,7 @@ def main():
     
     print("Output folder:", options.output)
     print("Output file names: ", options.outputfile, "{#}.txt", sep='')
-    print("Database location: ", options.database, "\database", sep='')
+    print("Database location: ", options.database, "\\database", sep='')
     
     # Create the output folder if it doesn't exist
     if not os.path.exists(options.output):
@@ -292,6 +323,8 @@ def main():
     print("Number of lines that were not words:",f"{non_words:,}")
     
     
+    dbenv.close()
+
     elapsed_time = time.time() - start_time
     formatted_time = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
     print("Total runtime:", formatted_time)
